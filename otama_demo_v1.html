@@ -1,0 +1,397 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>オタマレース ― 手触りデモ v1</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html,body { width:100%; height:100%; overflow:hidden; background:#15030f; font-family: system-ui, -apple-system, sans-serif; }
+  #app { position:fixed; inset:0; }
+  canvas { display:block; }
+
+  #panel {
+    position:fixed; top:12px; left:12px; z-index:10;
+    width:286px; max-height:calc(100% - 24px); overflow-y:auto;
+    background:rgba(22,5,17,0.84); backdrop-filter:blur(8px);
+    border:1px solid rgba(255,150,190,0.25); border-radius:14px;
+    padding:14px 14px 16px; color:#ffd9e6; font-size:12px;
+  }
+  #panel h1 { font-size:13px; letter-spacing:.03em; margin-bottom:4px; color:#ff9ec4; }
+  #panel .sub { font-size:10.5px; color:#c98aa6; margin-bottom:10px; line-height:1.55; }
+  .row { margin:8px 0; }
+  .row label { display:flex; justify-content:space-between; margin-bottom:3px; color:#ffc2d8; }
+  .row label .val { color:#fff; font-variant-numeric:tabular-nums; }
+  .row input[type=range]{ width:100%; accent-color:#ff5e9a; height:16px; }
+  .star { color:#ffd54a; }
+  .btns { display:flex; gap:8px; margin-top:12px; }
+  .btns button {
+    flex:1; padding:7px; border:none; border-radius:9px; cursor:pointer;
+    background:#ff4f93; color:#fff; font-weight:600; font-size:12px;
+  }
+  .btns button.sec { background:rgba(255,255,255,0.12); color:#ffd9e6; }
+
+  #hud {
+    position:fixed; top:12px; right:12px; z-index:10; text-align:right;
+    color:#ffe3ee; font-size:12px; text-shadow:0 1px 4px #000; pointer-events:none;
+  }
+  #hud .big { font-size:24px; font-weight:800; color:#fff; line-height:1.1; }
+  #hud .lab { font-size:10px; color:#e9a9c4; letter-spacing:.08em; }
+
+  #help {
+    position:fixed; bottom:12px; left:50%; transform:translateX(-50%); z-index:10;
+    color:#ffd9e6; font-size:12px; background:rgba(22,5,17,0.72);
+    padding:7px 16px; border-radius:20px; text-shadow:0 1px 2px #000; white-space:nowrap;
+  }
+  #help b{ color:#ff9ec4; }
+
+  #charge {
+    position:fixed; bottom:52px; left:50%; transform:translateX(-50%); z-index:10;
+    width:160px; height:8px; border-radius:5px; background:rgba(255,255,255,0.15);
+    overflow:hidden; display:none;
+  }
+  #charge > div { height:100%; width:0%; background:linear-gradient(90deg,#ffd54a,#ff4f93); }
+
+  #banner {
+    position:fixed; inset:0; z-index:20; display:none;
+    align-items:center; justify-content:center; flex-direction:column;
+    background:rgba(15,3,11,0.55); color:#fff; text-align:center;
+  }
+  #banner .t { font-size:46px; font-weight:800; color:#ffd54a; text-shadow:0 2px 24px #ff5e9a; }
+  #banner .s { margin-top:8px; font-size:15px; color:#ffd9e6; }
+  #banner button{ margin-top:20px; padding:10px 28px; border:none; border-radius:11px; cursor:pointer; background:#ff4f93; color:#fff; font-weight:700; font-size:14px; }
+</style>
+</head>
+<body>
+<div id="app"></div>
+
+<div id="panel">
+  <h1>オタマ手触りデモ v1</h1>
+  <div class="sub">体内トンネルを跳ねて卵子を目指す。狙いは「まっすぐ進めないのに、もう一回やりたい」一点を数値で探すこと。</div>
+  <div id="sliders"></div>
+  <div class="btns">
+    <button id="resetBtn">リセット (R)</button>
+    <button class="sec" id="hideBtn">隠す (H)</button>
+  </div>
+</div>
+
+<div id="hud">
+  <div class="lab">しんこう</div>
+  <div class="big"><span id="dist">0</span><span style="font-size:13px"> m</span></div>
+  <div class="lab" style="margin-top:6px">ゴールまで <span id="togo">200</span> m</div>
+  <div class="lab">そくど <span id="spd">0.0</span></div>
+</div>
+
+<div id="help">操作: <b>&larr; &rarr;</b> / <b>A D</b> 寄せる ／ <b>Space長押し&rarr;離す</b> タメ大ジャンプ ／ <b>R</b> リセット</div>
+<div id="charge"><div id="chargeFill"></div></div>
+
+<div id="banner">
+  <div class="t">受精成功</div>
+  <div class="s"><span id="cleartime">0.0</span> 秒でゴール</div>
+  <button id="againBtn">もう一回 (R)</button>
+</div>
+
+<script type="importmap">
+{ "imports": { "three": "./three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// ============================================================
+//  パラメータ（手触りの沼。全部スライダーで生調整できる）
+// ============================================================
+const P = {
+  gravity:    { v:30,   min:5,   max:60,  step:1,    label:'重力' },
+  bounceVel:  { v:9,    min:3,   max:20,  step:0.5,  label:'オート跳ねの高さ' },
+  bounceWait: { v:0.04, min:0,   max:0.5, step:0.01, label:'跳ね間隔（着地後のタメ）' },
+  forward:    { v:9,    min:2,   max:25,  step:0.5,  label:'前進スピード' },
+  sway:       { v:4.0,  min:0,   max:12,  step:0.2,  label:'左右ブレの強さ', star:true },
+  steer:      { v:7,    min:1,   max:18,  step:0.5,  label:'方向入力の効き' },
+  jumpVel:    { v:16,   min:6,   max:30,  step:0.5,  label:'任意ジャンプの高さ' },
+  chargeMax:  { v:2.2,  min:1,   max:4,   step:0.1,  label:'最大タメ倍率' },
+  chargeTime: { v:0.6,  min:0.1, max:2,   step:0.1,  label:'最大タメまでの秒' },
+};
+const GOAL = 200;          // ゴール（卵子）のz
+const COURSE = 250;        // トンネル全長
+const HALF_W = 6;          // 通路の半幅（横の壁）
+
+// ============================================================
+//  Three.js セットアップ
+// ============================================================
+const app = document.getElementById('app');
+const scene = new THREE.Scene();
+const SKY = new THREE.Color(0x2a0618);
+scene.background = SKY;
+scene.fog = new THREE.FogExp2(0x2a0618, 0.018);
+
+const camera = new THREE.PerspectiveCamera(60, innerWidth/innerHeight, 0.1, 600);
+camera.position.set(0, 6, -11);
+
+const renderer = new THREE.WebGLRenderer({ antialias:true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+app.appendChild(renderer.domElement);
+
+scene.add(new THREE.AmbientLight(0xffd9e6, 0.75));
+const dir = new THREE.DirectionalLight(0xffffff, 1.1);
+dir.position.set(6, 14, -6);
+scene.add(dir);
+
+// --- 体内トンネル（円筒・内側）---
+const tunMat = new THREE.MeshStandardMaterial({ color:0xd45a86, roughness:0.85, side:THREE.BackSide });
+const tunnel = new THREE.Mesh(new THREE.CylinderGeometry(9, 9, COURSE+40, 28, 1, true), tunMat);
+tunnel.rotation.x = Math.PI/2;
+tunnel.position.set(0, 3, COURSE/2 - 15);
+scene.add(tunnel);
+
+// --- 床 ---
+const floorMat = new THREE.MeshStandardMaterial({ color:0xc24a78, roughness:0.95 });
+const floor = new THREE.Mesh(new THREE.PlaneGeometry(40, COURSE+60), floorMat);
+floor.rotation.x = -Math.PI/2;
+floor.position.set(0, 0, COURSE/2 - 15);
+scene.add(floor);
+
+// --- 進行リング（スピード感）---
+const ringMat = new THREE.MeshStandardMaterial({ color:0xff7eb0, emissive:0xff2e7e, emissiveIntensity:0.6, roughness:0.5 });
+for (let z = 15; z < GOAL; z += 18) {
+  const ring = new THREE.Mesh(new THREE.TorusGeometry(6.4, 0.18, 8, 32), ringMat);
+  ring.position.set(0, 3, z);
+  scene.add(ring);
+}
+
+// --- 絨毛（雑な体内装飾・当たり判定なし）---
+const villiMat = new THREE.MeshStandardMaterial({ color:0xe0628c, roughness:0.9 });
+let seed = 1234;
+const rnd = () => { seed = (seed*9301 + 49297) % 233280; return seed/233280; }; // 固定シード乱数
+for (let i = 0; i < 90; i++) {
+  const a = rnd() * Math.PI * 2;
+  const z = rnd() * (GOAL + 10);
+  const len = 0.8 + rnd()*2.2;
+  const v = new THREE.Mesh(new THREE.CapsuleGeometry(0.18, len, 4, 6), villiMat);
+  v.position.set(Math.cos(a)*8.2, 3 + Math.sin(a)*8.2, z);
+  v.lookAt(0, 3, z);
+  scene.add(v);
+}
+
+// --- 卵子（ゴール）---
+const egg = new THREE.Mesh(
+  new THREE.SphereGeometry(6, 32, 24),
+  new THREE.MeshStandardMaterial({ color:0xffe07a, emissive:0xffb020, emissiveIntensity:0.7, roughness:0.4 })
+);
+egg.position.set(0, 4, GOAL + 8);
+scene.add(egg);
+const eggGlow = new THREE.PointLight(0xffd060, 2.4, 60);
+eggGlow.position.copy(egg.position);
+scene.add(eggGlow);
+
+// ============================================================
+//  オタマ（プリミティブの組み合わせ・粒度は雑）
+// ============================================================
+const otama = new THREE.Group();
+const headMat = new THREE.MeshStandardMaterial({ color:0xfff4e0, roughness:0.45, emissive:0x331a22, emissiveIntensity:0.25 });
+const head = new THREE.Mesh(new THREE.SphereGeometry(0.85, 24, 18), headMat);
+head.scale.set(0.9, 1.05, 1.0);
+otama.add(head);
+
+const whiteMat = new THREE.MeshStandardMaterial({ color:0xffffff, roughness:0.3 });
+const blackMat = new THREE.MeshStandardMaterial({ color:0x111111, roughness:0.3 });
+for (const sx of [-1, 1]) {
+  const eye = new THREE.Mesh(new THREE.SphereGeometry(0.22, 12, 10), whiteMat);
+  eye.position.set(0.32*sx, 0.28, 0.62);
+  otama.add(eye);
+  const pup = new THREE.Mesh(new THREE.SphereGeometry(0.11, 10, 8), blackMat);
+  pup.position.set(0.34*sx, 0.27, 0.78);
+  otama.add(pup);
+}
+
+// しっぽ（後方・くねらせる）
+const tailPivot = new THREE.Group();
+tailPivot.position.set(0, 0, -0.7);
+const tailMat = new THREE.MeshStandardMaterial({ color:0xffe9c0, roughness:0.5, transparent:true, opacity:0.92 });
+const tail = new THREE.Mesh(new THREE.ConeGeometry(0.34, 2.4, 10), tailMat);
+tail.rotation.x = -Math.PI/2;   // 後ろ(-z)へ向ける
+tail.position.set(0, 0, -1.2);
+tailPivot.add(tail);
+otama.add(tailPivot);
+scene.add(otama);
+
+// ============================================================
+//  状態
+// ============================================================
+const S = {
+  x:0, y:0, z:0,
+  vx:0, vy:0, vz:0,
+  grounded:true, landWait:0,
+  charging:false, chargeT:0,
+  cleared:false, startT:0,
+};
+const keys = { left:false, right:false };
+
+function reset() {
+  S.x=0; S.y=0; S.z=0; S.vx=0; S.vy=0; S.vz=0;
+  S.grounded=true; S.landWait=0; S.charging=false; S.chargeT=0;
+  S.cleared=false; S.startT=performance.now()/1000;
+  document.getElementById('banner').style.display='none';
+  document.getElementById('charge').style.display='none';
+}
+
+// ============================================================
+//  入力
+// ============================================================
+addEventListener('keydown', (e) => {
+  if (e.code==='ArrowLeft' || e.code==='KeyA') keys.left = true;
+  if (e.code==='ArrowRight'|| e.code==='KeyD') keys.right = true;
+  if (e.code==='KeyR') reset();
+  if (e.code==='KeyH') togglePanel();
+  if (e.code==='Space') {
+    e.preventDefault();
+    if (!S.charging && !S.cleared) { S.charging = true; S.chargeT = 0; }
+  }
+});
+addEventListener('keyup', (e) => {
+  if (e.code==='ArrowLeft' || e.code==='KeyA') keys.left = false;
+  if (e.code==='ArrowRight'|| e.code==='KeyD') keys.right = false;
+  if (e.code==='Space') {
+    e.preventDefault();
+    if (S.charging) {
+      const c = Math.min(S.chargeT / P.chargeTime.v, 1);   // 0..1
+      const mult = 1 + c * (P.chargeMax.v - 1);
+      S.vy = P.jumpVel.v * mult;
+      S.grounded = false;
+      S.charging = false;
+      document.getElementById('charge').style.display='none';
+    }
+  }
+});
+
+// ============================================================
+//  更新
+// ============================================================
+function update(dt) {
+  if (S.cleared) return;
+
+  // --- 横方向：入力で目標速度へじわっと寄せる ---
+  let steerIn = (keys.right?1:0) - (keys.left?1:0);
+  const targetVx = steerIn * P.steer.v;
+  S.vx += (targetVx - S.vx) * Math.min(1, dt*4);
+
+  // --- 前進：常に一定速へ寄せる ---
+  S.vz += (P.forward.v - S.vz) * Math.min(1, dt*6);
+
+  // --- タメ中：縦は静止チャージ、前進は継続 ---
+  if (S.charging) {
+    S.chargeT += dt;
+    const c = Math.min(S.chargeT / P.chargeTime.v, 1);
+    const ch = document.getElementById('charge');
+    ch.style.display='block';
+    document.getElementById('chargeFill').style.width = (c*100)+'%';
+    if (S.grounded) { S.y = 0; S.vy = 0; }
+    else { S.vy -= P.gravity.v * dt; S.y += S.vy * dt; if (S.y<=0){S.y=0;S.vy=0;S.grounded=true;} }
+  } else {
+    // --- 通常：重力／オート跳ね ---
+    if (!S.grounded) {
+      S.vy -= P.gravity.v * dt;
+      S.y += S.vy * dt;
+      if (S.y <= 0) { S.y=0; S.vy=0; S.grounded=true; S.landWait=0; }
+    } else {
+      S.landWait += dt;
+      if (S.landWait >= P.bounceWait.v) {
+        S.vy = P.bounceVel.v;                                   // オート離陸
+        S.vx += (Math.random()*2 - 1) * P.sway.v;               // ★左右ブレ（離陸インパルス）
+        S.grounded = false;
+      }
+    }
+  }
+
+  // --- 位置更新 ---
+  S.x += S.vx * dt;
+  S.z += S.vz * dt;
+
+  // --- 壁（横の限界）---
+  if (S.x >  HALF_W) { S.x =  HALF_W; S.vx *= -0.4; }
+  if (S.x < -HALF_W) { S.x = -HALF_W; S.vx *= -0.4; }
+
+  // --- 見た目に反映 ---
+  otama.position.set(S.x, S.y, S.z);
+  // squash & stretch（跳ねで縦に伸び、着地で潰れる）
+  const stretch = THREE.MathUtils.clamp(1 + S.vy*0.02, 0.75, 1.35);
+  head.scale.set(0.9/Math.sqrt(stretch), 1.05*stretch, 1.0/Math.sqrt(stretch));
+  // バンク（横速度で傾く）／ピッチ（上下で煽る）
+  otama.rotation.z = THREE.MathUtils.clamp(-S.vx*0.04, -0.5, 0.5);
+  otama.rotation.x = THREE.MathUtils.clamp(-S.vy*0.02, -0.4, 0.4);
+  // しっぽを振る（跳ねるほど速く）
+  const t = performance.now()/1000;
+  tailPivot.rotation.y = Math.sin(t * (8 + Math.abs(S.vy))) * 0.6;
+
+  // --- カメラ追従 ---
+  const desired = new THREE.Vector3(S.x*0.5, S.y*0.4 + 6, S.z - 11);
+  camera.position.lerp(desired, Math.min(1, dt*4));
+  camera.lookAt(S.x*0.5, 2.5, S.z + 7);
+
+  // --- ゴール判定 ---
+  if (S.z >= GOAL && !S.cleared) {
+    S.cleared = true;
+    const secs = (performance.now()/1000 - S.startT).toFixed(1);
+    document.getElementById('cleartime').textContent = secs;
+    document.getElementById('banner').style.display='flex';
+    document.getElementById('charge').style.display='none';
+  }
+
+  // --- HUD ---
+  document.getElementById('dist').textContent = Math.max(0, Math.floor(S.z));
+  document.getElementById('togo').textContent = Math.max(0, Math.ceil(GOAL - S.z));
+  document.getElementById('spd').textContent = S.vz.toFixed(1);
+}
+
+// ============================================================
+//  ループ
+// ============================================================
+let last = performance.now()/1000;
+reset();
+function loop() {
+  const now = performance.now()/1000;
+  const dt = Math.min(now - last, 0.05);   // スパイク防止
+  last = now;
+  update(dt);
+  egg.rotation.y += dt*0.4;
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loop();
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// ============================================================
+//  スライダーUI生成
+// ============================================================
+const slidersEl = document.getElementById('sliders');
+for (const key in P) {
+  const p = P[key];
+  const row = document.createElement('div');
+  row.className = 'row';
+  const star = p.star ? ' <span class="star">★最重要</span>' : '';
+  row.innerHTML =
+    `<label><span>${p.label}${star}</span><span class="val" id="val_${key}">${p.v}</span></label>` +
+    `<input type="range" min="${p.min}" max="${p.max}" step="${p.step}" value="${p.v}" id="sl_${key}">`;
+  slidersEl.appendChild(row);
+  row.querySelector('input').addEventListener('input', (e) => {
+    p.v = parseFloat(e.target.value);
+    document.getElementById('val_'+key).textContent = p.v;
+  });
+}
+
+let panelHidden = false;
+function togglePanel() {
+  panelHidden = !panelHidden;
+  document.getElementById('panel').style.display = panelHidden ? 'none' : 'block';
+}
+document.getElementById('resetBtn').addEventListener('click', reset);
+document.getElementById('againBtn').addEventListener('click', reset);
+document.getElementById('hideBtn').addEventListener('click', togglePanel);
+</script>
+</body>
+</html>
