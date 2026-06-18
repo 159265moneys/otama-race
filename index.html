@@ -321,7 +321,7 @@ function update(dt) {
   if (S.cleared) return;
 
   // --- 横方向：入力で目標速度へじわっと寄せる ---
-  let steerIn = (keys.right?1:0) - (keys.left?1:0);
+  let steerIn = (keys.left?1:0) - (keys.right?1:0);   // 画面基準: D/→で右、A/←で左
   const targetVx = steerIn * P.steer.v;
   S.vx += (targetVx - S.vx) * Math.min(1, dt*4);
 
