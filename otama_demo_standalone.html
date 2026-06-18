@@ -3,6 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<meta name="robots" content="noindex, nofollow" />
 <title>オタマレース ― 手触りデモ v1</title>
 <style>
   * { margin:0; padding:0; box-sizing:border-box; }
@@ -82,7 +83,7 @@
   <div class="lab">そくど <span id="spd">0.0</span></div>
 </div>
 
-<div id="help">操作: <b>&larr; &rarr;</b> / <b>A D</b> 寄せる ／ <b>Space長押し&rarr;離す</b> タメ大ジャンプ ／ <b>R</b> リセット</div>
+<div id="help">操作: <b>&larr; &rarr;</b> 寄せる ／ <b>Space</b> ジャンプ（長押しタメ・空中で2段） ／ <b>Shift</b> ダッシュ ／ <b>E</b> 回転攻撃 ／ <b>R</b> リセット</div>
 <div id="charge"><div id="chargeFill"></div></div>
 
 <div id="banner">
@@ -107,13 +108,18 @@ const P = {
   forward:    { v:9,    min:2,   max:25,  step:0.5,  label:'前進スピード' },
   sway:       { v:4.0,  min:0,   max:12,  step:0.2,  label:'左右ブレの強さ', star:true },
   steer:      { v:7,    min:1,   max:18,  step:0.5,  label:'方向入力の効き' },
-  jumpVel:    { v:16,   min:6,   max:30,  step:0.5,  label:'任意ジャンプの高さ' },
-  chargeMax:  { v:2.2,  min:1,   max:4,   step:0.1,  label:'最大タメ倍率' },
+  jumpVel:    { v:13,   min:6,   max:30,  step:0.5,  label:'任意ジャンプの高さ（上）' },
+  jumpFwd:    { v:14,   min:0,   max:40,  step:1,    label:'任意ジャンプの前進力', star:true },
+  chargeMax:  { v:2.2,  min:1,   max:4,   step:0.1,  label:'最大タメ倍率（上も前も）' },
   chargeTime: { v:0.6,  min:0.1, max:2,   step:0.1,  label:'最大タメまでの秒' },
+  dashMult:   { v:2.4,  min:1.2, max:5,   step:0.1,  label:'ダッシュ倍率' },
+  dashDur:    { v:0.4,  min:0.1, max:1.2, step:0.05, label:'ダッシュ持続（秒）' },
 };
 const GOAL = 200;          // ゴール（卵子）のz
 const COURSE = 250;        // トンネル全長
 const HALF_W = 6;          // 通路の半幅（横の壁）
+// 回転攻撃・ダッシュの内部定数
+const SPIN_DUR = 0.45, SPIN_COOL = 0.7, SPIN_RADIUS = 4.5, DASH_COOL = 0.5;
 
 // ============================================================
 //  Three.js セットアップ
@@ -215,6 +221,14 @@ tailPivot.add(tail);
 otama.add(tailPivot);
 scene.add(otama);
 
+// 回転攻撃の輪エフェクト（今は見た目のみ。将来の対人/障害排除の判定をここに乗せる）
+const spinRing = new THREE.Mesh(
+  new THREE.TorusGeometry(1, 0.12, 8, 28),
+  new THREE.MeshStandardMaterial({ color:0x9be7ff, emissive:0x39c5ff, emissiveIntensity:1.2, transparent:true, opacity:0 })
+);
+spinRing.rotation.x = Math.PI/2;   // 水平に広がる輪
+otama.add(spinRing);
+
 // ============================================================
 //  状態
 // ============================================================
@@ -223,6 +237,9 @@ const S = {
   vx:0, vy:0, vz:0,
   grounded:true, landWait:0,
   charging:false, chargeT:0,
+  jumpedManual:false, canDouble:false,   // 任意ジャンプ管理（2段ジャンプ用）
+  dashT:0, dashCool:0,                    // ダッシュ
+  spinT:0, spinCool:0,                    // 回転攻撃
   cleared:false, startT:0,
 };
 const keys = { left:false, right:false };
@@ -230,6 +247,8 @@ const keys = { left:false, right:false };
 function reset() {
   S.x=0; S.y=0; S.z=0; S.vx=0; S.vy=0; S.vz=0;
   S.grounded=true; S.landWait=0; S.charging=false; S.chargeT=0;
+  S.jumpedManual=false; S.canDouble=false;
+  S.dashT=0; S.dashCool=0; S.spinT=0; S.spinCool=0;
   S.cleared=false; S.startT=performance.now()/1000;
   document.getElementById('banner').style.display='none';
   document.getElementById('charge').style.display='none';
@@ -239,13 +258,41 @@ function reset() {
 //  入力
 // ============================================================
 addEventListener('keydown', (e) => {
+  if (e.repeat) { if (e.code==='Space') e.preventDefault(); return; }   // 長押しのリピートは無視
   if (e.code==='ArrowLeft' || e.code==='KeyA') keys.left = true;
   if (e.code==='ArrowRight'|| e.code==='KeyD') keys.right = true;
   if (e.code==='KeyR') reset();
   if (e.code==='KeyH') togglePanel();
+
   if (e.code==='Space') {
     e.preventDefault();
-    if (!S.charging && !S.cleared) { S.charging = true; S.chargeT = 0; }
+    if (S.cleared || S.charging) return;
+    if (!S.jumpedManual) {
+      // 1段目：タメ開始（地上なら即タメ、オート跳ね中の空中でも予約→接地でタメ）
+      S.charging = true; S.chargeT = 0;
+    } else if (S.canDouble) {
+      // 2段ジャンプ：空中で即発動（上＋前）
+      S.vy = P.jumpVel.v * 0.9;
+      S.vz += P.jumpFwd.v * 0.9;
+      S.canDouble = false;
+      S.grounded = false;
+    }
+  }
+
+  if (e.code==='ShiftLeft' || e.code==='ShiftRight') {
+    // ダッシュ：一時的に前進力UP
+    if (S.dashCool <= 0 && S.dashT <= 0 && !S.cleared) {
+      S.dashT = P.dashDur.v;
+      S.dashCool = P.dashDur.v + DASH_COOL;
+    }
+  }
+
+  if (e.code==='KeyE') {
+    // 回転攻撃：今は見た目＋判定の器（将来の対人妨害／障害排除）
+    if (S.spinCool <= 0 && !S.cleared) {
+      S.spinT = SPIN_DUR;
+      S.spinCool = SPIN_DUR + SPIN_COOL;
+    }
   }
 });
 addEventListener('keyup', (e) => {
@@ -256,9 +303,12 @@ addEventListener('keyup', (e) => {
     if (S.charging) {
       const c = Math.min(S.chargeT / P.chargeTime.v, 1);   // 0..1
       const mult = 1 + c * (P.chargeMax.v - 1);
-      S.vy = P.jumpVel.v * mult;
+      S.vy  = P.jumpVel.v * mult;     // 上へ
+      S.vz += P.jumpFwd.v * mult;     // 前へ（タメるほど遠くへ飛ぶ）
       S.grounded = false;
       S.charging = false;
+      S.jumpedManual = true;
+      S.canDouble = true;             // 空中で2段ジャンプ可能に
       document.getElementById('charge').style.display='none';
     }
   }
@@ -275,8 +325,13 @@ function update(dt) {
   const targetVx = steerIn * P.steer.v;
   S.vx += (targetVx - S.vx) * Math.min(1, dt*4);
 
-  // --- 前進：常に一定速へ寄せる ---
-  S.vz += (P.forward.v - S.vz) * Math.min(1, dt*6);
+  // --- ダッシュのタイマー ---
+  if (S.dashT > 0) S.dashT -= dt;
+  if (S.dashCool > 0) S.dashCool -= dt;
+
+  // --- 前進：常に一定速へ寄せる（ダッシュ中は倍率）---
+  const fwdTarget = P.forward.v * (S.dashT > 0 ? P.dashMult.v : 1);
+  S.vz += (fwdTarget - S.vz) * Math.min(1, dt*6);
 
   // --- タメ中：縦は静止チャージ、前進は継続 ---
   if (S.charging) {
@@ -292,7 +347,7 @@ function update(dt) {
     if (!S.grounded) {
       S.vy -= P.gravity.v * dt;
       S.y += S.vy * dt;
-      if (S.y <= 0) { S.y=0; S.vy=0; S.grounded=true; S.landWait=0; }
+      if (S.y <= 0) { S.y=0; S.vy=0; S.grounded=true; S.landWait=0; S.jumpedManual=false; S.canDouble=false; }
     } else {
       S.landWait += dt;
       if (S.landWait >= P.bounceWait.v) {
@@ -323,10 +378,25 @@ function update(dt) {
   const t = performance.now()/1000;
   tailPivot.rotation.y = Math.sin(t * (8 + Math.abs(S.vy))) * 0.6;
 
-  // --- カメラ追従 ---
-  const desired = new THREE.Vector3(S.x*0.5, S.y*0.4 + 6, S.z - 11);
-  camera.position.lerp(desired, Math.min(1, dt*4));
-  camera.lookAt(S.x*0.5, 2.5, S.z + 7);
+  // --- 回転攻撃の演出 ---
+  if (S.spinCool > 0) S.spinCool -= dt;
+  if (S.spinT > 0) {
+    S.spinT -= dt;
+    otama.rotation.y += dt * 28;                         // 高速スピン
+    const prog = 1 - Math.max(S.spinT, 0) / SPIN_DUR;    // 0->1
+    spinRing.material.opacity = (1 - prog) * 0.9;
+    const r = 0.3 + prog * SPIN_RADIUS;
+    spinRing.scale.set(r, r, r);
+  } else {
+    otama.rotation.y = 0;
+    spinRing.material.opacity = 0;
+  }
+
+  // --- カメラ：横も縦も固定。前進(z)だけ追う。動くのはオタマだけ ---
+  camera.position.x = 0;
+  camera.position.y = 6;
+  camera.position.z += ((S.z - 11) - camera.position.z) * Math.min(1, dt*4);
+  camera.lookAt(0, 3, camera.position.z + 18);
 
   // --- ゴール判定 ---
   if (S.z >= GOAL && !S.cleared) {
