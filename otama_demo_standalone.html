@@ -4,7 +4,7 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <meta name="robots" content="noindex, nofollow" />
-<title>オタマレース ― 手触りデモ v3（カメラ分離）</title>
+<title>オタマレース ― 手触りデモ v4（障害物・敵）</title>
 <style>
   * { margin:0; padding:0; box-sizing:border-box; }
   html,body { width:100%; height:100%; overflow:hidden; background:#15030f; font-family: system-ui, -apple-system, sans-serif; }
@@ -38,6 +38,7 @@
   }
   #hud .big { font-size:24px; font-weight:800; color:#fff; line-height:1.1; }
   #hud .lab { font-size:10px; color:#e9a9c4; letter-spacing:.08em; }
+  #hud .knock { color:#ff5e5e; font-weight:800; display:none; }
 
   #help {
     position:fixed; bottom:12px; left:50%; transform:translateX(-50%); z-index:10;
@@ -74,8 +75,8 @@
 <div id="app"></div>
 
 <div id="panel">
-  <h1>オタマ手触りデモ v3（カメラ分離）</h1>
-  <div class="sub">マウス＝視点（画面クリックでロック）、WASD＝移動。オタマは進む方向を自動で向く。カメラは移動で勝手に回らない。</div>
+  <h1>オタマ手触りデモ v4（障害物・敵）</h1>
+  <div class="sub">マウス＝視点（画面クリックでロック）、WASD＝移動。柱・振り子・白血球を避ける。ジャンプで飛び越え、Eで弾く。当たると逆方向に吹き飛ぶ。</div>
   <div id="sliders"></div>
   <div class="btns">
     <button id="resetBtn">リセット (R)</button>
@@ -88,6 +89,7 @@
   <div class="big"><span id="dist">0</span><span style="font-size:13px"> m</span></div>
   <div class="lab" style="margin-top:6px">ゴールまで <span id="togo">0</span> m</div>
   <div class="lab">そくど <span id="spd">0.0</span></div>
+  <div class="knock" id="knockLbl">ふっとび中！</div>
 </div>
 
 <div id="help">操作: <b>WASD</b> 移動 ／ <b>マウス</b> 視点 ／ <b>Space</b> ジャンプ ／ <b>Shift</b> ダッシュ ／ <b>E</b> 回転攻撃 ／ <b>R</b> リセット</div>
@@ -121,12 +123,18 @@ const P = {
   chargeTime: { v:0.6,  min:0.1, max:2,   step:0.1,  label:'最大タメまでの秒' },
   dashMult:   { v:1.9,  min:1.2, max:4,   step:0.1,  label:'ダッシュ倍率' },
   dashDur:    { v:0.5,  min:0.1, max:1.5, step:0.05, label:'ダッシュ持続（秒）' },
+  knockPower: { v:18,   min:5,   max:45,  step:1,    label:'吹き飛びの強さ', star:true },
+  knockUp:    { v:11,   min:0,   max:25,  step:1,    label:'吹き飛びの上向き' },
+  enemySpeed: { v:5,    min:0,   max:14,  step:0.5,  label:'白血球の速さ' },
   mouseSens:  { v:1.0,  min:0.3, max:3,   step:0.1,  label:'マウス感度' },
 };
 const GOAL = 350;
 const COURSE = 400;
 const HALF_W = 8;
 const SPIN_DUR = 0.45, SPIN_COOL = 0.7, SPIN_RADIUS = 4.5, DASH_COOL = 0.5;
+const ENEMY_SENSE = 15;       // 白血球がオタマを感知して追尾する距離
+const OTAMA_R = 0.9;          // オタマの当たり半径
+const KNOCK_DUR = 0.7;        // 吹き飛び（操作不能）時間
 
 // ============================================================
 //  Three.js セットアップ
@@ -144,9 +152,9 @@ renderer.setSize(innerWidth, innerHeight);
 app.appendChild(renderer.domElement);
 
 scene.add(new THREE.AmbientLight(0xffd9e6, 0.75));
-const dir = new THREE.DirectionalLight(0xffffff, 1.1);
-dir.position.set(6, 14, -6);
-scene.add(dir);
+const dirLight = new THREE.DirectionalLight(0xffffff, 1.1);
+dirLight.position.set(6, 14, -6);
+scene.add(dirLight);
 
 const tunMat = new THREE.MeshStandardMaterial({ color:0xd45a86, roughness:0.85, side:THREE.BackSide });
 const tunnel = new THREE.Mesh(new THREE.CylinderGeometry(12, 12, COURSE+60, 30, 1, true), tunMat);
@@ -191,6 +199,43 @@ eggGlow.position.copy(egg.position);
 scene.add(eggGlow);
 
 // ============================================================
+//  障害物・敵
+// ============================================================
+const obstacles = [];   // {mesh, baseX, z, r, type, range, phase}
+const enemies = [];     // {mesh, x0, z0, x, z, r, phase, hitT, kx, kz}
+
+const pillarMat = new THREE.MeshStandardMaterial({ color:0xa83258, roughness:0.85 });
+const swingMat  = new THREE.MeshStandardMaterial({ color:0xff5e8f, emissive:0xff2e6e, emissiveIntensity:0.35, roughness:0.6 });
+const cellMat   = new THREE.MeshStandardMaterial({ color:0xf3ecff, emissive:0x9a86c4, emissiveIntensity:0.35, roughness:0.4, transparent:true, opacity:0.85 });
+
+function addPillar(x, z) {
+  const h = 6;
+  const m = new THREE.Mesh(new THREE.CylinderGeometry(0.9, 1.15, h, 12), pillarMat);
+  m.position.set(x, h/2, z);
+  scene.add(m);
+  obstacles.push({ mesh:m, baseX:x, z, r:1.5, type:'pillar' });
+}
+function addSwinger(z, range) {
+  const m = new THREE.Mesh(new THREE.BoxGeometry(3.2, 5, 1.1), swingMat);
+  m.position.set(0, 2.5, z);
+  scene.add(m);
+  obstacles.push({ mesh:m, baseX:0, z, r:2.1, type:'swinger', range, phase:rnd()*6.28 });
+}
+function addCell(x, z) {
+  const m = new THREE.Mesh(new THREE.SphereGeometry(1.3, 18, 14), cellMat);
+  const core = new THREE.Mesh(new THREE.SphereGeometry(0.6, 12, 10), new THREE.MeshStandardMaterial({ color:0xc9b4ee, emissive:0x6a4fa0, emissiveIntensity:0.5 }));
+  m.add(core);
+  scene.add(m);
+  enemies.push({ mesh:m, x0:x, z0:z, x, z, r:1.5, phase:rnd()*6.28, hitT:0, kx:0, kz:0 });
+}
+
+// 手置き配置（固定シードで再現性）
+seed = 777;
+[40,68,68,96,124,124,152,184,216,216,250,288,288,322].forEach(z => addPillar((rnd()*2-1)*5.5, z));
+[88,150,210,272,318].forEach((z,i) => addSwinger(z, 5 + i*0.3));
+[120,165,205,255,300,335].forEach(z => addCell((rnd()*2-1)*5, z));
+
+// ============================================================
 //  オタマ
 // ============================================================
 const otama = new THREE.Group();
@@ -228,21 +273,20 @@ spinRing.rotation.x = Math.PI/2;
 scene.add(spinRing);
 
 // ============================================================
-//  状態（カメラ分離モデル）
+//  状態
 // ============================================================
 const S = {
-  x:0, y:0, z:0, heading:0,   // heading=オタマの見た目の向き（移動方向へ追従）
-  pvx:0, pvz:0,               // 移動速度
-  bvx:0, bvz:0,               // 着地の左右ブレ
-  vy:0,
+  x:0, y:0, z:0, heading:0,
+  pvx:0, pvz:0, bvx:0, bvz:0, vy:0,
   grounded:true, landWait:0,
   charging:false, chargeT:0,
   jumpedManual:false, canDouble:false,
   dashT:0, dashCool:0,
   spinT:0, spinCool:0, spinYaw:0,
+  knockT:0, tumble:0,
   cleared:false, startT:0,
 };
-let camYaw = 0, camPitch = 0.22;     // カメラ角（マウスで操作・移動とは独立）
+let camYaw = 0, camPitch = 0.22;
 const keys = { w:false, a:false, s:false, d:false };
 
 function reset() {
@@ -251,14 +295,16 @@ function reset() {
   S.grounded=true; S.landWait=0; S.charging=false; S.chargeT=0;
   S.jumpedManual=false; S.canDouble=false;
   S.dashT=0; S.dashCool=0; S.spinT=0; S.spinCool=0; S.spinYaw=0;
+  S.knockT=0; S.tumble=0;
   S.cleared=false; S.startT=performance.now()/1000;
   camYaw = 0; camPitch = 0.22;
+  for (const e of enemies) { e.x=e.x0; e.z=e.z0; e.hitT=0; e.kx=0; e.kz=0; }
   document.getElementById('banner').style.display='none';
   document.getElementById('charge').style.display='none';
 }
 
 // ============================================================
-//  入力（WASD移動 ＋ マウス視点）
+//  入力
 // ============================================================
 addEventListener('keydown', (e) => {
   if (e.repeat) { if (e.code==='Space') e.preventDefault(); return; }
@@ -271,15 +317,15 @@ addEventListener('keydown', (e) => {
 
   if (e.code==='Space') {
     e.preventDefault();
-    if (S.cleared || S.charging) return;
+    if (S.cleared || S.charging || S.knockT > 0) return;
     if (!S.jumpedManual) { S.charging = true; S.chargeT = 0; }
     else if (S.canDouble) { S.vy = P.jumpVel.v * 0.9; S.canDouble = false; S.grounded = false; }
   }
   if (e.code==='ShiftLeft' || e.code==='ShiftRight') {
-    if (S.dashCool <= 0 && S.dashT <= 0 && !S.cleared) { S.dashT = P.dashDur.v; S.dashCool = P.dashDur.v + DASH_COOL; }
+    if (S.dashCool <= 0 && S.dashT <= 0 && !S.cleared && S.knockT <= 0) { S.dashT = P.dashDur.v; S.dashCool = P.dashDur.v + DASH_COOL; }
   }
   if (e.code==='KeyE') {
-    if (S.spinCool <= 0 && !S.cleared) { S.spinT = SPIN_DUR; S.spinCool = SPIN_DUR + SPIN_COOL; S.spinYaw = S.heading; }
+    if (S.spinCool <= 0 && !S.cleared && S.knockT <= 0) { S.spinT = SPIN_DUR; S.spinCool = SPIN_DUR + SPIN_COOL; S.spinYaw = S.heading; }
   }
 });
 addEventListener('keyup', (e) => {
@@ -300,7 +346,6 @@ addEventListener('keyup', (e) => {
   }
 });
 
-// --- マウス視点（Pointer Lock）---
 const canvasEl = renderer.domElement;
 canvasEl.addEventListener('click', () => { canvasEl.requestPointerLock(); });
 document.addEventListener('mousemove', (e) => {
@@ -322,37 +367,52 @@ function lerpAngle(a, target, t) {
   if (d < -Math.PI) d += 2*Math.PI;
   return a + d * t;
 }
+function knockback(dx, dz) {
+  const d = Math.hypot(dx, dz) || 1;
+  S.pvx = (dx/d) * P.knockPower.v;     // 当たった逆方向（障害物→オタマ）へ吹き飛ぶ
+  S.pvz = (dz/d) * P.knockPower.v;
+  S.bvx = 0; S.bvz = 0;
+  S.vy = P.knockUp.v; S.grounded = false;
+  S.knockT = KNOCK_DUR; S.tumble = 0;
+  S.charging = false;
+  document.getElementById('charge').style.display='none';
+}
 
 function update(dt) {
   if (S.cleared) return;
-
-  // --- カメラ基準の移動ベクトル（WASD）---
-  const cf = { x: Math.sin(camYaw), z: Math.cos(camYaw) };   // カメラ前方(水平)
-  const cr = { x: Math.cos(camYaw), z: -Math.sin(camYaw) };  // カメラ右方(水平)
-  let mx = ((keys.w?1:0) - (keys.s?1:0))*cf.x + ((keys.d?1:0) - (keys.a?1:0))*cr.x;
-  let mz = ((keys.w?1:0) - (keys.s?1:0))*cf.z + ((keys.d?1:0) - (keys.a?1:0))*cr.z;
-  const mlen = Math.hypot(mx, mz);
-  if (mlen > 0.001) { mx/=mlen; mz/=mlen; }
+  const t = performance.now()/1000;
+  const knocked = S.knockT > 0;
+  if (knocked) S.knockT -= dt;
 
   if (S.dashT > 0) S.dashT -= dt;
   if (S.dashCool > 0) S.dashCool -= dt;
 
-  // --- 移動（カメラ相対）---
-  const maxV = P.fwdMax.v * (S.dashT > 0 ? P.dashMult.v : 1);
-  const tvx = mlen > 0.001 ? mx*maxV : 0;
-  const tvz = mlen > 0.001 ? mz*maxV : 0;
-  S.pvx += (tvx - S.pvx) * Math.min(1, dt*5);
-  S.pvz += (tvz - S.pvz) * Math.min(1, dt*5);
+  if (knocked) {
+    // 吹き飛び中：入力不能、慣性で飛んでいく
+    S.pvx += (0 - S.pvx) * Math.min(1, dt*1.2);
+    S.pvz += (0 - S.pvz) * Math.min(1, dt*1.2);
+  } else {
+    // カメラ基準の移動ベクトル（WASD）
+    const cf = { x: Math.sin(camYaw), z: Math.cos(camYaw) };
+    const cr = { x: Math.cos(camYaw), z: -Math.sin(camYaw) };
+    let mx = ((keys.w?1:0) - (keys.s?1:0))*cf.x + ((keys.d?1:0) - (keys.a?1:0))*cr.x;
+    let mz = ((keys.w?1:0) - (keys.s?1:0))*cf.z + ((keys.d?1:0) - (keys.a?1:0))*cr.z;
+    const mlen = Math.hypot(mx, mz);
+    if (mlen > 0.001) { mx/=mlen; mz/=mlen; }
+    const maxV = P.fwdMax.v * (S.dashT > 0 ? P.dashMult.v : 1);
+    const tvx = mlen > 0.001 ? mx*maxV : 0;
+    const tvz = mlen > 0.001 ? mz*maxV : 0;
+    S.pvx += (tvx - S.pvx) * Math.min(1, dt*5);
+    S.pvz += (tvz - S.pvz) * Math.min(1, dt*5);
+    if (mlen > 0.001) S.heading = lerpAngle(S.heading, Math.atan2(mx, mz), Math.min(1, dt*P.faceTurn.v));
+  }
+  const rx = Math.cos(S.heading), rz = -Math.sin(S.heading);
 
-  // --- オタマは進む方向を向く（カメラとは独立）---
-  if (mlen > 0.001) S.heading = lerpAngle(S.heading, Math.atan2(mx, mz), Math.min(1, dt*P.faceTurn.v));
-  const rx = Math.cos(S.heading), rz = -Math.sin(S.heading);   // 向きの右方（着地ブレ用）
-
-  // --- 左右ブレ減衰 ---
+  // 左右ブレ減衰
   S.bvx += (0 - S.bvx) * Math.min(1, dt*3);
   S.bvz += (0 - S.bvz) * Math.min(1, dt*3);
 
-  // --- 縦：タメ／重力／オート跳ね ---
+  // 縦：タメ／重力／オート跳ね（吹き飛び中はオート跳ねしない）
   if (S.charging) {
     S.chargeT += dt;
     const c = Math.min(S.chargeT / P.chargeTime.v, 1);
@@ -366,27 +426,81 @@ function update(dt) {
       S.y += S.vy * dt;
       if (S.y <= 0) {
         S.y=0; S.vy=0; S.grounded=true; S.landWait=0; S.jumpedManual=false; S.canDouble=false;
-        const R = (Math.random()*2 - 1) * P.sway.v;
-        S.bvx += rx*R; S.bvz += rz*R;
+        if (!knocked) {
+          const R = (Math.random()*2 - 1) * P.sway.v;
+          S.bvx += rx*R; S.bvz += rz*R;
+        }
       }
-    } else {
+    } else if (!knocked) {
       S.landWait += dt;
       if (S.landWait >= P.bounceWait.v) { S.vy = P.bounceVel.v; S.grounded = false; }
     }
   }
 
-  // --- 位置更新 ---
+  // 位置更新
   S.x += (S.pvx + S.bvx) * dt;
   S.z += (S.pvz + S.bvz) * dt;
   if (S.x >  HALF_W) { S.x =  HALF_W; S.pvx *= -0.3; S.bvx *= -0.3; }
   if (S.x < -HALF_W) { S.x = -HALF_W; S.pvx *= -0.3; S.bvx *= -0.3; }
   if (S.z < -6) { S.z = -6; S.pvz = 0; }
 
-  // --- 見た目 ---
+  // 振り子の動き
+  for (const o of obstacles) {
+    if (o.type === 'swinger') o.mesh.position.x = Math.sin(t*1.2 + o.phase) * o.range;
+  }
+
+  // 敵（白血球）：追尾／弾かれて後退
+  for (const e of enemies) {
+    if (e.hitT > 0) {
+      e.hitT -= dt;
+      e.x += e.kx * dt; e.z += e.kz * dt;
+      e.kx *= (1 - Math.min(1, dt*2)); e.kz *= (1 - Math.min(1, dt*2));
+    } else {
+      const dx = S.x - e.x, dz = S.z - e.z;
+      const d = Math.hypot(dx, dz);
+      if (d < ENEMY_SENSE && d > 0.1) {
+        e.x += (dx/d) * P.enemySpeed.v * dt;
+        e.z += (dz/d) * P.enemySpeed.v * dt;
+      }
+    }
+    e.x = THREE.MathUtils.clamp(e.x, -HALF_W-1, HALF_W+1);
+    e.mesh.position.set(e.x, 1.3 + Math.sin(t*3 + e.phase)*0.18, e.z);
+    e.mesh.material.opacity = e.hitT > 0 ? 0.5 : 0.85;
+  }
+
+  // 回転攻撃で白血球を弾く（自分は無敵）
+  if (S.spinT > 0) {
+    for (const e of enemies) {
+      if (e.hitT > 0) continue;
+      const dx = e.x - S.x, dz = e.z - S.z;
+      const d = Math.hypot(dx, dz);
+      if (d < SPIN_RADIUS + e.r) {
+        const nx = dx/(d||1), nz = dz/(d||1);
+        e.kx = nx * 22; e.kz = nz * 22; e.hitT = 1.3;
+      }
+    }
+  }
+
+  // 当たり判定（吹き飛び中・回転中・高くジャンプ中は無効）
+  if (S.knockT <= 0 && S.spinT <= 0 && S.y < 2.5) {
+    for (const o of obstacles) {
+      const ox = o.type === 'swinger' ? o.mesh.position.x : o.baseX;
+      const dx = S.x - ox, dz = S.z - o.z;
+      if (Math.hypot(dx, dz) < o.r + OTAMA_R) { knockback(dx, dz); break; }
+    }
+    if (S.knockT <= 0) {
+      for (const e of enemies) {
+        if (e.hitT > 0) continue;
+        const dx = S.x - e.x, dz = S.z - e.z;
+        if (Math.hypot(dx, dz) < e.r + OTAMA_R) { knockback(dx, dz); break; }
+      }
+    }
+  }
+
+  // 見た目
   otama.position.set(S.x, S.y, S.z);
   const stretch = THREE.MathUtils.clamp(1 + S.vy*0.02, 0.75, 1.35);
   head.scale.set(0.9/Math.sqrt(stretch), 1.05*stretch, 1.0/Math.sqrt(stretch));
-  const t = performance.now()/1000;
   tailPivot.rotation.y = Math.sin(t * (8 + Math.abs(S.vy))) * 0.6;
 
   if (S.spinCool > 0) S.spinCool -= dt;
@@ -399,12 +513,16 @@ function update(dt) {
     const r = 0.3 + prog * SPIN_RADIUS;
     spinRing.position.set(S.x, S.y + 0.2, S.z);
     spinRing.scale.set(r, r, r);
+  } else if (knocked) {
+    S.tumble += dt * 16;                                   // 吹き飛び中はくるくる
+    otama.rotation.set(S.tumble, S.heading, S.tumble*0.6);
+    spinRing.material.opacity = 0;
   } else {
     otama.rotation.set(THREE.MathUtils.clamp(-S.vy*0.02, -0.4, 0.4), S.heading, 0);
     spinRing.material.opacity = 0;
   }
 
-  // --- カメラ：マウスのyaw/pitchでオタマの周りをオービット。移動では回らない（分離）---
+  // カメラ（マウスのyaw/pitchでオービット。移動では回らない）
   const lookY = 2.5, dist = 12;
   const off = {
     x: -Math.sin(camYaw) * Math.cos(camPitch),
@@ -417,7 +535,7 @@ function update(dt) {
   camera.position.z += (tz - camera.position.z) * Math.min(1, dt*10);
   camera.lookAt(S.x, S.y + lookY, S.z);
 
-  // --- ゴール判定 ---
+  // ゴール
   if (S.z >= GOAL && !S.cleared) {
     S.cleared = true;
     document.getElementById('cleartime').textContent = (performance.now()/1000 - S.startT).toFixed(1);
@@ -425,10 +543,11 @@ function update(dt) {
     document.getElementById('charge').style.display='none';
   }
 
-  // --- HUD ---
+  // HUD
   document.getElementById('dist').textContent = Math.max(0, Math.floor(S.z));
   document.getElementById('togo').textContent = Math.max(0, Math.ceil(GOAL - S.z));
   document.getElementById('spd').textContent = Math.hypot(S.pvx + S.bvx, S.pvz + S.bvz).toFixed(1);
+  document.getElementById('knockLbl').style.display = knocked ? 'block' : 'none';
 }
 
 // ============================================================
